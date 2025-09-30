@@ -33,14 +33,17 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          FEED_URLS: ${{ secrets.FEED_URLS }}
-          LOOKBACK_HOURS: ${{ secrets.LOOKBACK_HOURS }}
-          MAX_ITEMS: ${{ secrets.MAX_ITEMS }}
-          SIMILARITY_THRESHOLD: ${{ secrets.SIMILARITY_THRESHOLD }}
-          MAX_PER_DOMAIN: ${{ secrets.MAX_PER_DOMAIN }}
-          ONLY_NEW: ${{ secrets.ONLY_NEW }}
-          SEEN_TTL_DAYS: ${{ secrets.SEEN_TTL_DAYS }}
-          # 아래 두 줄은 안전한 기본값
+
+          # Repository Variables 참조 (Settings → Variables → Actions)
+          FEED_URLS: ${{ vars.FEED_URLS }}
+          LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS }}
+          MAX_ITEMS: ${{ vars.MAX_ITEMS }}
+          SIMILARITY_THRESHOLD: ${{ vars.SIMILARITY_THRESHOLD }}
+          MAX_PER_DOMAIN: ${{ vars.MAX_PER_DOMAIN }}
+          ONLY_NEW: ${{ vars.ONLY_NEW }}
+          SEEN_TTL_DAYS: ${{ vars.SEEN_TTL_DAYS }}
+
+          # 안전한 기본값
           DRY_RUN: "0"
           DEBUG_DUMP: "0"
         run: python alerts_to_notion.py
