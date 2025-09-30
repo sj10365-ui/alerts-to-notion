@@ -1,5 +1,5 @@
 # alerts_to_notion.py
-import os, re, time, json, logging, unicodedata
+import os, re, time, json, logging, unicodedata, html
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
@@ -72,12 +72,47 @@ assert NOTION_TOKEN, "NOTION_TOKEN 필요"
 assert NOTION_DATABASE_ID, "NOTION_DATABASE_ID 필요(하이픈 없는 32자리)"
 assert FEED_URLS, "FEED_URLS 필요(Variables/Secrets에 URL 목록)"
 
-# =================== UTIL ===================
+# =================== UTIL / NORMALIZE ===================
+
+# 추한 HTML 엔티티/스마트 따옴표/대시 등 통일
+CHAR_REPLACE = {
+    "\u2018": "'",  # ‘
+    "\u2019": "'",  # ’
+    "\u201C": '"',  # “
+    "\u201D": '"',  # ”
+    "\u2013": "-",  # –
+    "\u2014": "-",  # —
+    "\u00A0": " ",  # nbsp
+    "\u200b": "",   # zero width space
+}
+
+# 기사 말미 보일러플레이트/저작권/구독/쿠키 안내 제거
+BOILERPLATE_PATTERNS = [
+    r"무단\s*전재\s*및\s*재배포\s*금지.*$",
+    r"본\s*기사는.*?저작권.*?보호.*$",
+    r"구독|광고문의|제보하기|뉴스레터\s*구독.*$",
+    r"쿠키(를|가)\s*허용|브라우저.*(설정|지원).*$",
+    r"Copyright\s*©.*$",
+    r"ⓒ.*(신문|뉴스|미디어).*$",
+]
+
 TRACKING_PARAMS = {
     "utm_source","utm_medium","utm_campaign","utm_term","utm_content",
     "utm_name","utm_id","utm_reader","utm_cid","utm_referrer",
     "fbclid","gclid","msclkid","igshid","ved","ei","oq","aqs","sclient"
 }
+
+def _apply_char_replace(s: str) -> str:
+    if not s: return s
+    for k,v in CHAR_REPLACE.items():
+        s = s.replace(k, v)
+    return s
+
+def _strip_boilerplate(s: str) -> str:
+    if not s: return s
+    for pat in BOILERPLATE_PATTERNS:
+        s = re.sub(pat, "", s, flags=re.IGNORECASE)
+    return s.strip()
 
 def domain_of(url:str)->str:
     try:
@@ -87,8 +122,17 @@ def domain_of(url:str)->str:
         return ""
 
 def normalize_text(t:str)->str:
+    # 1) 태그 제거
     t = re.sub(r"<[^>]+>", " ", t or "")
-    return re.sub(r"\s+", " ", t).strip()
+    # 2) 엔티티 해제(두 번 안전하게)
+    t = html.unescape(html.unescape(t))
+    # 3) 스마트 따옴표/대시/공백 정리
+    t = _apply_char_replace(t)
+    # 4) 여백 압축
+    t = re.sub(r"\s+", " ", t).strip()
+    # 5) 말미 보일러플레이트 제거
+    t = _strip_boilerplate(t)
+    return t
 
 def _unwrap_google_url(url:str)->str:
     try:
@@ -114,9 +158,14 @@ def canonicalize_url(url:str)->str:
 BRACKET_PATTERNS = [r"\[[^\]]+\]", r"\([^)]+\)", r"【[^】]+】"]
 def normalize_title(t:str)->str:
     t = unicodedata.normalize("NFKC", t or "")
+    t = html.unescape(html.unescape(t))
+    t = _apply_char_replace(t)
     for p in BRACKET_PATTERNS:
         t = re.sub(p, " ", t)
-    return re.sub(r"\s+"," ", t).strip().lower()
+    t = re.sub(r"\s+", " ", t).strip()
+    # 제목도 불필요 꼬리표 제거(‘…| 언론사명’같은 것)
+    t = re.sub(r"\s*[-|]\s*(사진|포토|영상|단독|속보)\s*$", "", t)
+    return t.lower()
 
 def dump(items, label, n=20):
     if not DEBUG_DUMP: return
@@ -139,15 +188,15 @@ def fetch_article_text(url: str, timeout: int = 8) -> str:
         })
         if not res.ok:
             return ""
-        html = res.text
+        doc = res.text
 
-        html = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html)
-        html = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", html)
-        html = re.sub(r"(?is)<nav[^>]*>.*?</nav>", " ", html)
-        html = re.sub(r"(?is)<footer[^>]*>.*?</footer>", " ", html)
-        html = re.sub(r"(?is)<!--.*?-->", " ", html)
+        doc = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", doc)
+        doc = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", doc)
+        doc = re.sub(r"(?is)<nav[^>]*>.*?</nav>", " ", doc)
+        doc = re.sub(r"(?is)<footer[^>]*>.*?</footer>", " ", doc)
+        doc = re.sub(r"(?is)<!--.*?-->", " ", doc)
 
-        paras = re.findall(r"(?is)<p[^>]*>(.*?)</p>", html)
+        paras = re.findall(r"(?is)<p[^>]*>(.*?)</p>", doc)
         texts = []
         for p in paras:
             t = re.sub(r"<[^>]+>", " ", p)
@@ -167,9 +216,9 @@ def make_summary(title: str, feed_snippet: str, fulltext: str, limit: int = 500)
     - 없으면 RSS snippet 1~2문장 정리
     """
     def clean(s: str) -> str:
-        s = re.sub(r"\s+", " ", s or "").strip()
-        s = re.sub(r"©\s?\d{4}.*$", "", s)
-        s = re.sub(r"(무단 전재 및 재배포 금지).*", "", s)
+        s = normalize_text(s)
+        # 추가로 제목 반복/형식 꼬임 정돈
+        s = re.sub(r"^\W*"+re.escape((title or "").strip())+r"\W*", "", s, flags=re.IGNORECASE)
         return s.strip()
 
     if fulltext:
@@ -184,9 +233,6 @@ def make_summary(title: str, feed_snippet: str, fulltext: str, limit: int = 500)
         summary = " ".join(pick[:3])
     else:
         summary = clean(feed_snippet)
-        tl = (title or "").lower()
-        if summary.lower().startswith(tl):
-            summary = summary[len(title):].strip(" -:|")
 
     if len(summary) > limit:
         summary = summary[:limit-1] + "…"
@@ -275,8 +321,13 @@ def fetch_all(feeds):
             ts_struct = e.get("published_parsed") or e.get("updated_parsed")
             ts = datetime.fromtimestamp(time.mktime(ts_struct), tz=timezone.utc) if ts_struct else datetime.now(timezone.utc)
             link = canonicalize_url(getattr(e, "link", ""))
-            title = normalize_text(getattr(e, "title", ""))
-            summary = normalize_text(getattr(e, "summary", ""))[:800]
+            title_raw = getattr(e, "title", "")
+            summary_raw = getattr(e, "summary", "")
+
+            # 정규화 적용
+            title = normalize_text(title_raw)
+            summary = normalize_text(summary_raw)[:800]
+
             rows.append({
                 "title": title,
                 "summary": summary,
@@ -376,10 +427,10 @@ def notion_create_page(it, cat:str, source_type:str):
         "parent":{"database_id": NOTION_DATABASE_ID},
         "properties":{
             # 노션 DB 속성명: Title / Link / Summary / Source / Published / Category / SourceType
-            "Title":{"title":[{"text":{"content": it["title"][:200] or "(no title)"}}]},
-            "Link":{"url": it["link"][:2000]},
-            "Summary":{"rich_text":[{"text":{"content": it.get("summary","")[:1800]}}]},
-            "Source":{"rich_text":[{"text":{"content": it["domain"][:200]}}]},
+            "Title":{"title":[{"text":{"content": (it["title"] or "(no title)")[:200]}}]},
+            "Link":{"url": (it["link"] or "")[:2000]},
+            "Summary":{"rich_text":[{"text":{"content": (it.get("summary",""))[:1800]}}]},
+            "Source":{"rich_text":[{"text":{"content": (it["domain"] or "")[:200]}}]},
             "Published":{"date":{"start": it["published"].astimezone(timezone.utc).isoformat() }},
             "Category":{"select":{"name": cat or "기타"}},
         }
