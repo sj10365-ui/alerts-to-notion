@@ -363,32 +363,44 @@ def weighted_score(it):
         try: bonus += t.count(kw.lower()) * int(w) * BASE_UNIT
         except: pass
     return base + bonus
-# -------- 핵심 제목 클러스터링 --------
-COMPANY_WORDS = [
-    "이마트", "이마트24", "emart24", "롯데", "롯데백화점", "신세계", "gs25",
-    "세븐일레븐", "cu", "하이트진로", "롯데칠성", "오비맥주", "아영fbc",
-    "문배주", "국순당", "골든블루"
-]
-STOP_TOKENS = ["단독","속보","포토","영상","종합","인터뷰","발표","진행","출시","행사","페스티벌","페스타"]
+# -------- 핵심 제목 클러스터링 (한글 word-boundary 대응) --------
+COMPANY_RE = re.compile(
+    r"(이마트\s*24|이마트|emart\s*24|롯데백화점|롯데|신세계|gs\s*25|gs25|세븐일레븐|cu"
+    r"|하이트\s*진로|하이트진로|롯데\s*칠성|롯데칠성|오비\s*맥주|오비맥주|아영fbc"
+    r"|문배주|국순당|골든블루)", re.IGNORECASE
+)
+STOP_RE = re.compile(
+    r"(단독|속보|포토|영상|종합|인터뷰|발표|진행|개최|선보여|선봬|출시|행사|페스티벌|페스타)",
+    re.IGNORECASE
+)
 
 def core_title_key(title: str) -> str:
     t = title or ""
-    t = re.sub(r"[^\w가-힣\s]", " ", t, flags=re.UNICODE)       # 기호 제거
-    t = re.sub(r"\d{1,4}[./-]\d{1,2}[./-]\d{1,2}", " ", t)      # 날짜 제거
-    t = re.sub(r"\d[\d,\.]*", " ", t)                           # 숫자 제거
-    t = t.lower()
-    for w in COMPANY_WORDS:
-        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
-    for w in STOP_TOKENS:
-        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    # 너무 짧으면 원제목으로 fallback
-    return t if len(t) >= 6 else (title or "").lower()
+    t = html.unescape(t)
+    t = unicodedata.normalize("NFKC", t)
+    # 괄호·브라켓 블록 제거
+    t = re.sub(r"\[[^\]]+\]", " ", t)
+    t = re.sub(r"\([^)]+\)", " ", t)
+    # 날짜/숫자/기호 정리
+    t = re.sub(r"\d{1,4}[./-]\d{1,2}[./-]\d{1,2}", " ", t)  # 날짜
+    t = re.sub(r"\d[\d,\.]*", " ", t)                       # 숫자
+    t = re.sub(r"[^\w가-힣\s]", " ", t)                     # 기호
+    # 기업명/상투어는 '단순 치환'으로 제거(한글은 \b 비추)
+    t = COMPANY_RE.sub(" ", t)
+    t = STOP_RE.sub(" ", t)
+    # 공백 압축
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    # 너무 길면 앞쪽 정보 위주로 자름(유사 타이틀 그룹핑 강화)
+    tokens = t.split()
+    if len(tokens) >= 4:
+        t = " ".join(tokens[:12])
+    # 너무 짧으면 정규화 제목으로 fallback
+    if len(t) < 8:
+        t = normalize_title(title)
+    return t
 
 def collapse_by_core_title(items: list) -> list:
-    """
-    핵심 제목 키로 클러스터링해서 각 그룹의 최고 점수 1개만 유지
-    """
+    """핵심 제목 키로 클러스터링해서 각 그룹의 최고 점수 1개만 유지"""
     buckets = {}
     for it in items:
         key = core_title_key(it["title"])
@@ -532,18 +544,30 @@ def main():
         filtered = [it for it in all_items if it["published"] >= extra_cutoff]
         logging.info(f"low volume → extended lookback: {len(filtered)} items")
 
+    # 정렬(가중치 반영)
     ranked = sorted(filtered, key=weighted_score, reverse=True); dump(ranked,"RANKED")
-    # 핵심 제목 기준 1차 클러스터링(동일 보도자료 싱딕·브랜드 반복 축소)
+
+    # 1) 핵심 제목 기준 1차 클러스터링(보도자료/브랜드 반복 축소)
     ranked = collapse_by_core_title(ranked)
 
+    # 2) 느슨한 퍼지 중복 제거(한 번 더 쓸어주기)
+    ranked = dedupe_similar(
+    ranked,
+    threshold=max(70, SIMILARITY_THRESHOLD - 10),
+    max_per_domain=MAX_PER_DOMAIN
+    )
+
+    # 표본이 적으면 기준 완화
     th = SIMILARITY_THRESHOLD
     cap = MAX_PER_DOMAIN
     if len(ranked) < 20:
         th = max(75, SIMILARITY_THRESHOLD - 5)
         cap = max(5, MAX_PER_DOMAIN)
-        logging.info(f"low volume → relax dedupe: th={th}, cap={cap}")
+        logging.info(f"low volume → relax dedupe: th=%s, cap=%s", th, cap)
 
-    uniq = dedupe_similar(ranked, threshold=th, max_per_domain=cap); logging.info(f"deduped {len(uniq)}"); dump(uniq,"DEDUPED")
+    # 3) 최종 중복 제거(원래 쓰던 강도)
+    uniq = dedupe_similar(ranked, threshold=th, max_per_domain=cap)
+    logging.info(f"deduped {len(uniq)}"); dump(uniq,"DEDUPED")
 
     # 신규만 남기기
     seen = load_seen(SEEN_FILE)
