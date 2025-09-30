@@ -46,6 +46,9 @@ jobs:
           # 안전한 기본값
           DRY_RUN: "0"
           DEBUG_DUMP: "0"
+          USE_FULLTEXT: ${{ vars.USE_FULLTEXT }}
+          FULLTEXT_TIMEOUT: ${{ vars.FULLTEXT_TIMEOUT }}
+          SUMMARY_MAX_CHARS: ${{ vars.SUMMARY_MAX_CHARS }}
         run: python alerts_to_notion.py
 
       # 이번 실행 후 갱신된 .seen_urls.json 저장(다음 실행에서 재사용)
