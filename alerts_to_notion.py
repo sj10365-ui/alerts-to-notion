@@ -67,24 +67,7 @@ def _json_set(env_key):
 DOMAIN_ALLOW = _json_set("DOMAIN_ALLOW")  # 비워두면 전체 허용
 DOMAIN_BLOCK = _json_set("DOMAIN_BLOCK")  # 여기에 있으면 제거
 
-# 필수값 체크
-assert NOTION_TOKEN, "NOTION_TOKEN 필요"
-assert NOTION_DATABASE_ID, "NOTION_DATABASE_ID 필요(하이픈 없는 32자리)"
-assert FEED_URLS, "FEED_URLS 필요(Variables/Secrets에 URL 목록)"
-
-# ── 경쟁사 기사 주류 키워드 강제 여부 ─────────────
-REQUIRE_LIQUOR_FOR_COMP = os.getenv("REQUIRE_LIQUOR_FOR_COMP","1") == "1"
-COMP_LIQUOR_REGEX = re.compile(
-    os.getenv(
-        "COMP_LIQUOR_REGEX",
-        r"(주류|술|위스키|하이볼|버번|스카치|싱글\s*몰트|블렌디드|"
-        r"와인|샴페인|스파클링|사케|니혼슈|일본주|"
-        r"맥주|수제맥주|라거|에일|\bIPA\b|크래프트\s*비어|"
-        r"전통주|막걸리|탁주|약주|증류주|리큐르|RTD)"
-    ),
-    re.IGNORECASE,
-)
-# ── 업계/경쟁사는 '술 관련' 글만 통과 ─────────────
+# ── 업계/경쟁사는 '술 관련' 글만 통과 + 문구 블록 ─────────────
 KEEP_ONLY_LIQUOR = os.getenv("KEEP_ONLY_LIQUOR", "1") == "1"
 
 def _json_list(env_key, default="[]"):
@@ -93,15 +76,23 @@ def _json_list(env_key, default="[]"):
     except Exception:
         return json.loads(default)
 
-# 예: ["자사"]면 자사 기사만 예외적으로 '술 아님(기타)'도 허용
+# 자사만 예외 허용(기본)
 NON_LIQUOR_ALLOW_FOR = set(_json_list("NON_LIQUOR_ALLOW_FOR", '["자사"]'))
 
-# 제목/요약에 이 문구가 있으면 컷(정규식 아님: 부분문자열 매칭)
+# 제목/요약에 포함되면 컷 (부분문자열)
 PHRASE_BLOCK_LIST = _json_list(
     "PHRASE_BLOCK",
-    '["그레잇 페스타","옐로우","사과빵","문정 사과빵","페스티벌","축제"]'
+    '["그레잇 페스타","GREAT FESTA","옐로우","yellow","PL 상품","자체브랜드",'
+    ' "사과빵","문정 사과빵","혜택가","창립행사","개점 행사","창립 기념",'
+    ' "수산물 페스티벌","축제","대축제","쇼핑 행사","오더톡","문정점","문정 사과",'
+    ' "가성비","식재료 할인","식재료 세일"]'
 )
 PHRASE_BLOCK_LIST = [s.lower() for s in PHRASE_BLOCK_LIST if s.strip()]
+
+# 필수값 체크
+assert NOTION_TOKEN, "NOTION_TOKEN 필요"
+assert NOTION_DATABASE_ID, "NOTION_DATABASE_ID 필요(하이픈 없는 32자리)"
+assert FEED_URLS, "FEED_URLS 필요(Variables/Secrets에 URL 목록)"
 
 # =================== UTIL / NORMALIZE ===================
 
@@ -194,7 +185,7 @@ def normalize_title(t:str)->str:
     for p in BRACKET_PATTERNS:
         t = re.sub(p, " ", t)
     t = re.sub(r"\s+", " ", t).strip()
-    # 제목도 불필요 꼬리표 제거(‘…| 언론사명’같은 것)
+    # 제목 꼬리표 제거(‘…| 언론사명’ 등)
     t = re.sub(r"\s*[-|]\s*(사진|포토|영상|단독|속보)\s*$", "", t)
     return t.lower()
 
@@ -248,7 +239,6 @@ def make_summary(title: str, feed_snippet: str, fulltext: str, limit: int = 500)
     """
     def clean(s: str) -> str:
         s = normalize_text(s)
-        # 추가로 제목 반복/형식 꼬임 정돈
         s = re.sub(r"^\W*"+re.escape((title or "").strip())+r"\W*", "", s, flags=re.IGNORECASE)
         return s.strip()
 
@@ -338,9 +328,7 @@ def classify_source_type(item: dict) -> str:
         for kw in SOURCE_TYPE_MAP.get(bucket, []):
             if kw and kw in hay:
                 return bucket
-    dom = (item.get("domain") or "").lower()
-    if any(x in dom for x in ["co.kr","com","go.kr","or.kr"]):
-        return "업계"
+    # 기본값: 업계
     return "업계"
 
 # =================== FETCH ===================
@@ -381,44 +369,33 @@ def weighted_score(it):
         try: bonus += t.count(kw.lower()) * int(w) * BASE_UNIT
         except: pass
     return base + bonus
-# -------- 핵심 제목 클러스터링 (한글 word-boundary 대응) --------
-COMPANY_RE = re.compile(
-    r"(이마트\s*24|이마트|emart\s*24|롯데백화점|롯데|신세계|gs\s*25|gs25|세븐일레븐|cu"
-    r"|하이트\s*진로|하이트진로|롯데\s*칠성|롯데칠성|오비\s*맥주|오비맥주|아영fbc"
-    r"|문배주|국순당|골든블루)", re.IGNORECASE
-)
-STOP_RE = re.compile(
-    r"(단독|속보|포토|영상|종합|인터뷰|발표|진행|개최|선보여|선봬|출시|행사|페스티벌|페스타)",
-    re.IGNORECASE
-)
+
+# -------- 핵심 제목 클러스터링(보도자료 파생 축소) --------
+COMPANY_WORDS = [
+    "이마트","이마트24","emart24","emart","롯데","롯데백화점","신세계","gs25",
+    "세븐일레븐","cu","하이트진로","롯데칠성","오비맥주","아영fbc",
+    "문배주","국순당","골든블루","pl","옐로우","yellow"
+]
+STOP_TOKENS = [
+    "단독","속보","포토","영상","종합","인터뷰","발표","진행","출시","선보여",
+    "공개","오픈","개점","행사","페스티벌","페스타","특가","세일","가성비",
+    "혜택","연휴","추석","창립","기념","대전","프로모션"
+]
 
 def core_title_key(title: str) -> str:
     t = title or ""
-    t = html.unescape(t)
-    t = unicodedata.normalize("NFKC", t)
-    # 괄호·브라켓 블록 제거
-    t = re.sub(r"\[[^\]]+\]", " ", t)
-    t = re.sub(r"\([^)]+\)", " ", t)
-    # 날짜/숫자/기호 정리
-    t = re.sub(r"\d{1,4}[./-]\d{1,2}[./-]\d{1,2}", " ", t)  # 날짜
-    t = re.sub(r"\d[\d,\.]*", " ", t)                       # 숫자
-    t = re.sub(r"[^\w가-힣\s]", " ", t)                     # 기호
-    # 기업명/상투어는 '단순 치환'으로 제거(한글은 \b 비추)
-    t = COMPANY_RE.sub(" ", t)
-    t = STOP_RE.sub(" ", t)
-    # 공백 압축
-    t = re.sub(r"\s+", " ", t).strip().lower()
-    # 너무 길면 앞쪽 정보 위주로 자름(유사 타이틀 그룹핑 강화)
-    tokens = t.split()
-    if len(tokens) >= 4:
-        t = " ".join(tokens[:12])
-    # 너무 짧으면 정규화 제목으로 fallback
-    if len(t) < 8:
-        t = normalize_title(title)
-    return t
+    t = re.sub(r"[^\w가-힣\s]", " ", t, flags=re.UNICODE)       # 기호 제거
+    t = re.sub(r"\d{1,4}[./-]\d{1,2}[./-]\d{1,2}", " ", t)      # 날짜 제거
+    t = re.sub(r"\d[\d,\.]*", " ", t)                           # 숫자 제거
+    t = t.lower()
+    for w in COMPANY_WORDS:
+        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
+    for w in STOP_TOKENS:
+        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t if len(t) >= 6 else (title or "").lower()
 
 def collapse_by_core_title(items: list) -> list:
-    """핵심 제목 키로 클러스터링해서 각 그룹의 최고 점수 1개만 유지"""
     buckets = {}
     for it in items:
         key = core_title_key(it["title"])
@@ -427,7 +404,7 @@ def collapse_by_core_title(items: list) -> list:
         if (cur is None) or (score > cur[0]):
             buckets[key] = (score, it)
     return [v[1] for v in buckets.values()]
-    
+
 # =================== DEDUPE ===================
 def dedupe_similar(items, threshold=80, max_per_domain=5):
     kept=[]; seen_per_dom={}
@@ -525,8 +502,8 @@ def main():
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=LOOKBACK_HOURS)
 
-    all_items = fetch_all(FEED_URLS); logging.info(f"fetched {len(all_items)}"); dump(all_items,"FETCH")
-    filtered = [it for it in all_items if it["published"] >= cutoff]; logging.info(f"time filter {len(filtered)}"); dump(filtered,"FILTERED")
+    all_items = fetch_all(FEED_URLS); logging.info(f"fetched %s", len(all_items)); dump(all_items,"FETCH")
+    filtered = [it for it in all_items if it["published"] >= cutoff]; logging.info(f"time filter %s", len(filtered)); dump(filtered,"FILTERED")
 
     # ── 도메인 허용/차단 적용 ───────────────────────
     if DOMAIN_BLOCK:
@@ -538,24 +515,8 @@ def main():
         before = len(filtered)
         filtered = [it for it in filtered if it["domain"] in DOMAIN_ALLOW]
         logging.info(f"domain allow: {before} -> {len(filtered)} (allow-only)")
-        
-    # ── 경쟁사 기사 가드: 주류 관련 키워드 없으면 컷 ─────────
-    if REQUIRE_LIQUOR_FOR_COMP:
-        before = len(filtered)
-        kept = []
-        for it in filtered:
-            src_type = classify_source_type(it)
-            if src_type == "경쟁사":
-                text = f"{it.get('title','')} {it.get('summary','')}"
-                # 1) 주류 키워드 정규식 매칭 OR 2) 카테고리 분류가 '기타'가 아닐 때만 통과
-                has_liquor_kw = bool(COMP_LIQUOR_REGEX.search(text))
-                cat = categorize(it.get("title",""), it.get("summary",""))
-                if not has_liquor_kw and cat == "기타":
-                    continue
-            kept.append(it)
-        filtered = kept
-        logging.info(f"competitor guard: {before} -> {len(filtered)}")
-    # ── 업계/경쟁사는 '술 관련' 글만 통과 + 블록리스트 문구 컷 ─────────
+
+    # ── 업계/경쟁사는 술 관련(카테고리)만 통과 + 블록 문구 컷 ─────────
     if KEEP_ONLY_LIQUOR:
         before = len(filtered)
         kept = []
@@ -564,28 +525,18 @@ def main():
             src = classify_source_type(it)
             text_l = f"{it.get('title','')} {it.get('summary','')}".lower()
 
-            # 2-1) 블록 문구 포함 시 컷(예: 그레잇 페스타/옐로우 등)
+            # 1) 블록 문구 포함 → 기본 컷 (단, 이미 술 카테고리면 살림)
             if PHRASE_BLOCK_LIST and any(p in text_l for p in PHRASE_BLOCK_LIST):
-                # 단, 이미 술 카테고리면 살린다
-                if cat in ("위스키","와인","사케","맥주","전통주"):
-                    pass
-                else:
+                if cat not in ("위스키","와인","사케","맥주","전통주"):
                     continue
 
-            # 2-2) 술 카테고리가 아니면(=기타) 원칙적으로 컷
+            # 2) 술 카테고리가 아니면(=기타) 자사만 예외
             if (cat == "기타") and (src not in NON_LIQUOR_ALLOW_FOR):
                 continue
 
             kept.append(it)
-
         filtered = kept
         logging.info(f"liquor-only & phrase-block: {before} -> {len(filtered)}")
-    
-    # 소량 보정: 표본이 적을 때 느슨화
-    if len(filtered) < 25:
-        extra_cutoff = now - timedelta(hours=LOOKBACK_HOURS * 2)
-        filtered = [it for it in all_items if it["published"] >= extra_cutoff]
-        logging.info(f"low volume → extended lookback: {len(filtered)} items")
 
     # 정렬(가중치 반영)
     ranked = sorted(filtered, key=weighted_score, reverse=True); dump(ranked,"RANKED")
@@ -595,9 +546,9 @@ def main():
 
     # 2) 느슨한 퍼지 중복 제거(한 번 더 쓸어주기)
     ranked = dedupe_similar(
-    ranked,
-    threshold=max(70, SIMILARITY_THRESHOLD - 10),
-    max_per_domain=MAX_PER_DOMAIN
+        ranked,
+        threshold=max(70, SIMILARITY_THRESHOLD - 10),
+        max_per_domain=MAX_PER_DOMAIN
     )
 
     # 표본이 적으면 기준 완화
@@ -637,7 +588,7 @@ def main():
             cat = categorize(it["title"], it.get("summary",""))
             src_type = classify_source_type(it)
             print(f"- [{cat}][{src_type}] {it['title']} ({it['domain']}) {it['link']}")
-            mark_seen(seen, it)  # 미리보기에서도 ‘본 것으로’ 처리하려면 유지
+            mark_seen(seen, it)
         save_seen(SEEN_FILE, seen)
         print("===============================\n")
         return
@@ -648,7 +599,7 @@ def main():
         src_type = classify_source_type(it)
         if notion_create_page(it, cat, src_type):
             ok+=1
-            mark_seen(seen, it)   # 성공한 것만 기록
+            mark_seen(seen, it)
         else:
             fail+=1
     save_seen(SEEN_FILE, seen)
