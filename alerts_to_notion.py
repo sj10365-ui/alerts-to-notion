@@ -363,7 +363,41 @@ def weighted_score(it):
         try: bonus += t.count(kw.lower()) * int(w) * BASE_UNIT
         except: pass
     return base + bonus
+# -------- 핵심 제목 클러스터링 --------
+COMPANY_WORDS = [
+    "이마트", "이마트24", "emart24", "롯데", "롯데백화점", "신세계", "gs25",
+    "세븐일레븐", "cu", "하이트진로", "롯데칠성", "오비맥주", "아영fbc",
+    "문배주", "국순당", "골든블루"
+]
+STOP_TOKENS = ["단독","속보","포토","영상","종합","인터뷰","발표","진행","출시","행사","페스티벌","페스타"]
 
+def core_title_key(title: str) -> str:
+    t = title or ""
+    t = re.sub(r"[^\w가-힣\s]", " ", t, flags=re.UNICODE)       # 기호 제거
+    t = re.sub(r"\d{1,4}[./-]\d{1,2}[./-]\d{1,2}", " ", t)      # 날짜 제거
+    t = re.sub(r"\d[\d,\.]*", " ", t)                           # 숫자 제거
+    t = t.lower()
+    for w in COMPANY_WORDS:
+        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
+    for w in STOP_TOKENS:
+        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    # 너무 짧으면 원제목으로 fallback
+    return t if len(t) >= 6 else (title or "").lower()
+
+def collapse_by_core_title(items: list) -> list:
+    """
+    핵심 제목 키로 클러스터링해서 각 그룹의 최고 점수 1개만 유지
+    """
+    buckets = {}
+    for it in items:
+        key = core_title_key(it["title"])
+        score = weighted_score(it)
+        cur = buckets.get(key)
+        if (cur is None) or (score > cur[0]):
+            buckets[key] = (score, it)
+    return [v[1] for v in buckets.values()]
+    
 # =================== DEDUPE ===================
 def dedupe_similar(items, threshold=80, max_per_domain=5):
     kept=[]; seen_per_dom={}
@@ -499,6 +533,8 @@ def main():
         logging.info(f"low volume → extended lookback: {len(filtered)} items")
 
     ranked = sorted(filtered, key=weighted_score, reverse=True); dump(ranked,"RANKED")
+    # 핵심 제목 기준 1차 클러스터링(동일 보도자료 싱딕·브랜드 반복 축소)
+ranked = collapse_by_core_title(ranked)
 
     th = SIMILARITY_THRESHOLD
     cap = MAX_PER_DOMAIN
