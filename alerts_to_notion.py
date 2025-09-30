@@ -72,6 +72,19 @@ assert NOTION_TOKEN, "NOTION_TOKEN 필요"
 assert NOTION_DATABASE_ID, "NOTION_DATABASE_ID 필요(하이픈 없는 32자리)"
 assert FEED_URLS, "FEED_URLS 필요(Variables/Secrets에 URL 목록)"
 
+# ── 경쟁사 기사 주류 키워드 강제 여부 ─────────────
+REQUIRE_LIQUOR_FOR_COMP = os.getenv("REQUIRE_LIQUOR_FOR_COMP","1") == "1"
+COMP_LIQUOR_REGEX = re.compile(
+    os.getenv(
+        "COMP_LIQUOR_REGEX",
+        r"(주류|술|위스키|하이볼|버번|스카치|싱글\s*몰트|블렌디드|"
+        r"와인|샴페인|스파클링|사케|니혼슈|일본주|"
+        r"맥주|수제맥주|라거|에일|\bIPA\b|크래프트\s*비어|"
+        r"전통주|막걸리|탁주|약주|증류주|리큐르|RTD)"
+    ),
+    re.IGNORECASE,
+)
+
 # =================== UTIL / NORMALIZE ===================
 
 # 추한 HTML 엔티티/스마트 따옴표/대시 등 통일
@@ -461,7 +474,24 @@ def main():
         before = len(filtered)
         filtered = [it for it in filtered if it["domain"] in DOMAIN_ALLOW]
         logging.info(f"domain allow: {before} -> {len(filtered)} (allow-only)")
-
+        
+    # ── 경쟁사 기사 가드: 주류 관련 키워드 없으면 컷 ─────────
+    if REQUIRE_LIQUOR_FOR_COMP:
+        before = len(filtered)
+        kept = []
+        for it in filtered:
+            src_type = classify_source_type(it)
+            if src_type == "경쟁사":
+                text = f"{it.get('title','')} {it.get('summary','')}"
+                # 1) 주류 키워드 정규식 매칭 OR 2) 카테고리 분류가 '기타'가 아닐 때만 통과
+                has_liquor_kw = bool(COMP_LIQUOR_REGEX.search(text))
+                cat = categorize(it.get("title",""), it.get("summary",""))
+                if not has_liquor_kw and cat == "기타":
+                    continue
+            kept.append(it)
+        filtered = kept
+        logging.info(f"competitor guard: {before} -> {len(filtered)}")
+        
     # 소량 보정: 표본이 적을 때 느슨화
     if len(filtered) < 25:
         extra_cutoff = now - timedelta(hours=LOOKBACK_HOURS * 2)
