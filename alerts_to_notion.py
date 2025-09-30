@@ -84,6 +84,24 @@ COMP_LIQUOR_REGEX = re.compile(
     ),
     re.IGNORECASE,
 )
+# ── 업계/경쟁사는 '술 관련' 글만 통과 ─────────────
+KEEP_ONLY_LIQUOR = os.getenv("KEEP_ONLY_LIQUOR", "1") == "1"
+
+def _json_list(env_key, default="[]"):
+    try:
+        return json.loads(os.getenv(env_key, default))
+    except Exception:
+        return json.loads(default)
+
+# 예: ["자사"]면 자사 기사만 예외적으로 '술 아님(기타)'도 허용
+NON_LIQUOR_ALLOW_FOR = set(_json_list("NON_LIQUOR_ALLOW_FOR", '["자사"]'))
+
+# 제목/요약에 이 문구가 있으면 컷(정규식 아님: 부분문자열 매칭)
+PHRASE_BLOCK_LIST = _json_list(
+    "PHRASE_BLOCK",
+    '["그레잇 페스타","옐로우","사과빵","문정 사과빵","페스티벌","축제"]'
+)
+PHRASE_BLOCK_LIST = [s.lower() for s in PHRASE_BLOCK_LIST if s.strip()]
 
 # =================== UTIL / NORMALIZE ===================
 
@@ -537,7 +555,32 @@ def main():
             kept.append(it)
         filtered = kept
         logging.info(f"competitor guard: {before} -> {len(filtered)}")
-        
+    # ── 업계/경쟁사는 '술 관련' 글만 통과 + 블록리스트 문구 컷 ─────────
+    if KEEP_ONLY_LIQUOR:
+        before = len(filtered)
+        kept = []
+        for it in filtered:
+            cat = categorize(it.get("title",""), it.get("summary",""))
+            src = classify_source_type(it)
+            text_l = f"{it.get('title','')} {it.get('summary','')}".lower()
+
+            # 2-1) 블록 문구 포함 시 컷(예: 그레잇 페스타/옐로우 등)
+            if PHRASE_BLOCK_LIST and any(p in text_l for p in PHRASE_BLOCK_LIST):
+                # 단, 이미 술 카테고리면 살린다
+                if cat in ("위스키","와인","사케","맥주","전통주"):
+                    pass
+                else:
+                    continue
+
+            # 2-2) 술 카테고리가 아니면(=기타) 원칙적으로 컷
+            if (cat == "기타") and (src not in NON_LIQUOR_ALLOW_FOR):
+                continue
+
+            kept.append(it)
+
+        filtered = kept
+        logging.info(f"liquor-only & phrase-block: {before} -> {len(filtered)}")
+    
     # 소량 보정: 표본이 적을 때 느슨화
     if len(filtered) < 25:
         extra_cutoff = now - timedelta(hours=LOOKBACK_HOURS * 2)
