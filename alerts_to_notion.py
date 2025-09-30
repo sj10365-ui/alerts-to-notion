@@ -534,7 +534,7 @@ def main():
 
     ranked = sorted(filtered, key=weighted_score, reverse=True); dump(ranked,"RANKED")
     # 핵심 제목 기준 1차 클러스터링(동일 보도자료 싱딕·브랜드 반복 축소)
-ranked = collapse_by_core_title(ranked)
+    ranked = collapse_by_core_title(ranked)
 
     th = SIMILARITY_THRESHOLD
     cap = MAX_PER_DOMAIN
