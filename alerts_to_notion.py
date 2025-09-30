@@ -12,7 +12,17 @@ logging.basicConfig(level=logging.INFO)
 # =================== ENV ===================
 NOTION_TOKEN        = os.getenv("NOTION_TOKEN", "").strip()
 NOTION_DATABASE_ID  = os.getenv("NOTION_DATABASE_ID", "").strip()
-FEED_URLS           = [u.strip() for u in os.getenv("FEED_URLS", "").split(",") if u.strip()]
+
+# FEED_URLS: 줄바꿈/쉼표 둘 다 지원
+def _parse_feed_urls(raw: str):
+    out = []
+    for part in (raw or "").splitlines():
+        for u in part.split(","):
+            u = u.strip()
+            if u:
+                out.append(u)
+    return out
+FEED_URLS           = _parse_feed_urls(os.getenv("FEED_URLS",""))
 
 LOOKBACK_HOURS      = int(os.getenv("LOOKBACK_HOURS", "168"))
 MAX_ITEMS           = int(os.getenv("MAX_ITEMS", "60"))
@@ -32,13 +42,17 @@ def _json_obj(env_key, default_obj):
     except Exception:
         return default_obj
 
+# 랭킹 가중치(선호/패널티) - 환경변수 JSON로 주입 가능
 FAVOR_WEIGHTS       = _json_obj("FAVOR_WEIGHTS", {})
 DOWNWEIGHT_WEIGHTS  = _json_obj("DOWNWEIGHT_WEIGHTS", {})
-KEYWORD_CATEGORY_FILE = os.getenv("KEYWORD_CATEGORY_FILE","").strip()
+
+# 카테고리/출처 분류용 사전 파일 경로
+KEYWORD_CATEGORY_FILE   = os.getenv("KEYWORD_CATEGORY_FILE","").strip()          # {"키워드":"카테고리"}
+SOURCE_TYPE_MAP_FILE    = os.getenv("SOURCE_TYPE_MAP_FILE","dictionary/source_type_map.json").strip()  # {"자사":[...],"경쟁사":[...], "업계":[...]}
 
 assert NOTION_TOKEN, "NOTION_TOKEN 필요"
 assert NOTION_DATABASE_ID, "NOTION_DATABASE_ID 필요(하이픈 없는 32자리)"
-assert FEED_URLS, "FEED_URLS 필요(콤마로 여러 개)"
+assert FEED_URLS, "FEED_URLS 필요(Variables/Secrets에 URL 목록)"
 
 # =================== UTIL ===================
 TRACKING_PARAMS = {
@@ -109,7 +123,7 @@ KEYWORD_CATEGORY_MAP = _load_keyword_map()
 CAT_ORDER = ["위스키","와인","사케","맥주","전통주","기타"]
 CAT_PATTERNS = [
     ("위스키",  [r"위스키", r"하이볼", r"스카치", r"버번", r"싱글\s*몰트", r"블렌디드"]),
-    ("와인",    [r"와인", r"레드와인", r"화이트와인", r"스파클링"]),
+    ("와인",    [r"와인", r"레드와인", r"화이트와인", r"스파클링", r"샴페인"]),
     ("사케",    [r"사케", r"니혼슈", r"일본주"]),
     ("맥주",    [r"맥주", r"수제맥주", r"크래프트\s*비어", r"라거", r"에일", r"\bIPA\b"]),
     ("전통주",  [r"전통주", r"우리술", r"막걸리", r"탁주", r"약주"]),
@@ -136,6 +150,52 @@ def categorize(title:str, summary:str="")->str:
             if re.search(p, tl) or re.search(p, sl):
                 return label
     return "기타"
+
+# =================== SOURCE TYPE (자사/경쟁사/업계) ===================
+def _load_source_type_map(path: str):
+    """
+    {"자사":[...], "경쟁사":[...], "업계":[...]}
+    전부 소문자화하여 매칭.
+    """
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        else:
+            raw = {}
+        norm = {bucket: [kw.lower() for kw in kws] for bucket, kws in raw.items()}
+        # 기본 버킷 보장
+        for b in ("자사","경쟁사","업계"):
+            norm.setdefault(b, [])
+        return norm
+    except Exception as e:
+        logging.warning(f"source_type map load failed: {e}")
+        return {"자사": [], "경쟁사": [], "업계": []}
+
+SOURCE_TYPE_MAP = _load_source_type_map(SOURCE_TYPE_MAP_FILE)
+
+def classify_source_type(item: dict) -> str:
+    """
+    우선순위: 자사 > 경쟁사 > 업계 (MAP 순회 순서)
+    제목/요약/도메인/링크 전체 문자열에서 부분일치
+    """
+    hay = " ".join([
+        str(item.get("title","")),
+        str(item.get("summary","")),
+        str(item.get("domain","")),
+        str(item.get("link","")),
+    ]).lower()
+    hay = re.sub(r"\s+", " ", hay)
+
+    for bucket in ("자사","경쟁사","업계"):
+        for kw in SOURCE_TYPE_MAP.get(bucket, []):
+            if kw and kw in hay:
+                return bucket
+    # 간단한 휴리스틱: 도메인에 편의점/면세/백화점 등이 보이면 '업계'
+    dom = (item.get("domain") or "").lower()
+    if any(x in dom for x in ["co.kr","com","go.kr","or.kr"]):
+        return "업계"
+    return "업계"
 
 # =================== FETCH ===================
 def fetch_all(feeds):
@@ -235,7 +295,7 @@ def mark_seen(seen:dict, it:dict):
         seen[k]["last_seen"] = now_iso
 
 # =================== NOTION ===================
-def notion_create_page(it):
+def notion_create_page(it, cat:str, source_type:str):
     url="https://api.notion.com/v1/pages"
     safe_token = re.sub(r"[^\x20-\x7E]", "", (NOTION_TOKEN or "")).strip()
     headers={
@@ -243,18 +303,21 @@ def notion_create_page(it):
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json"
     }
-    cat = categorize(it["title"], it.get("summary",""))
     data={
         "parent":{"database_id": NOTION_DATABASE_ID},
         "properties":{
-            "Title":{"title":[{"text":{"content": it["title"][:200] or "(제목 없음)"}}]},
+            # ⚠️ 노션 DB 속성명: Title / Link / Summary / Source / Published / Category / SourceType
+            "Title":{"title":[{"text":{"content": it["title"][:200] or "(no title)"}}]},
             "Link":{"url": it["link"][:2000]},
             "Summary":{"rich_text":[{"text":{"content": it.get("summary","")[:1800]}}]},
             "Source":{"rich_text":[{"text":{"content": it["domain"][:200]}}]},
             "Published":{"date":{"start": it["published"].astimezone(timezone.utc).isoformat() }},
-            "Category":{"select":{"name": cat}},
+            "Category":{"select":{"name": cat or "기타"}},
         }
     }
+    if source_type:
+        data["properties"]["SourceType"] = {"select": {"name": source_type}}
+
     r = requests.post(url, headers=headers, json=data, timeout=20)
     if not r.ok:
         logging.error(f"Notion error: {r.text}")
@@ -299,7 +362,8 @@ def main():
         print("\n=== DRY RUN (to be written) ===")
         for it in items:
             cat = categorize(it["title"], it.get("summary",""))
-            print(f"- [{cat}] {it['title']} ({it['domain']}) {it['link']}")
+            src_type = classify_source_type(it)
+            print(f"- [{cat}][{src_type}] {it['title']} ({it['domain']}) {it['link']}")
             # 미리보기에서도 ‘본 것으로’ 마킹하려면 다음 줄 유지
             mark_seen(seen, it)
         save_seen(SEEN_FILE, seen)
@@ -308,7 +372,9 @@ def main():
 
     ok=0; fail=0
     for it in items:
-        if notion_create_page(it):
+        cat = categorize(it["title"], it.get("summary",""))
+        src_type = classify_source_type(it)
+        if notion_create_page(it, cat, src_type):
             ok+=1
             mark_seen(seen, it)   # 성공한 것만 기록
         else:
