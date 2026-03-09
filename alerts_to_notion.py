@@ -3,7 +3,7 @@ import os, re, time, json, logging, unicodedata, html
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
-import feedparser, requests
+import feedparser, requests, trafilatura
 from rapidfuzz import fuzz
 from dotenv import load_dotenv
 
@@ -199,36 +199,15 @@ def dump(items, label, n=20):
 
 # =================== FULLTEXT & SUMMARY ===================
 def fetch_article_text(url: str, timeout: int = 8) -> str:
-    """
-    가벼운 휴리스틱 본문 추출:
-    - script/style/nav/footer 제거
-    - <p> 텍스트 밀도가 높은 덩어리 선호
-    """
+    """trafilatura로 본문 추출. 실패 시 빈 문자열 반환."""
     try:
         res = requests.get(url, timeout=timeout, headers={
             "User-Agent": "Mozilla/5.0 (compatible; AlertsToNotion/1.0)"
         })
         if not res.ok:
             return ""
-        doc = res.text
-
-        doc = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", doc)
-        doc = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", doc)
-        doc = re.sub(r"(?is)<nav[^>]*>.*?</nav>", " ", doc)
-        doc = re.sub(r"(?is)<footer[^>]*>.*?</footer>", " ", doc)
-        doc = re.sub(r"(?is)<!--.*?-->", " ", doc)
-
-        paras = re.findall(r"(?is)<p[^>]*>(.*?)</p>", doc)
-        texts = []
-        for p in paras:
-            t = re.sub(r"<[^>]+>", " ", p)
-            t = normalize_text(t)
-            if len(t) >= 40:
-                texts.append(t)
-
-        texts = sorted(texts, key=len, reverse=True)[:25]
-        body = " ".join(texts)
-        return normalize_text(body)
+        text = trafilatura.extract(res.text, include_comments=False, include_tables=False)
+        return normalize_text(text) if text else ""
     except Exception:
         return ""
 
@@ -338,7 +317,13 @@ def fetch_all(feeds):
         d=feedparser.parse(url)
         for e in d.entries:
             ts_struct = e.get("published_parsed") or e.get("updated_parsed")
-            ts = datetime.fromtimestamp(time.mktime(ts_struct), tz=timezone.utc) if ts_struct else datetime.now(timezone.utc)
+            if ts_struct:
+                try:
+                    ts = datetime.fromtimestamp(time.mktime(ts_struct), tz=timezone.utc)
+                except (TypeError, OverflowError, OSError):
+                    ts = datetime.now(timezone.utc)
+            else:
+                ts = datetime.now(timezone.utc)
             link = canonicalize_url(getattr(e, "link", ""))
             title_raw = getattr(e, "title", "")
             summary_raw = getattr(e, "summary", "")
@@ -366,7 +351,7 @@ def weighted_score(it):
         try: bonus += t.count(kw.lower()) * int(w) * BASE_UNIT
         except: pass
     for kw, w in DOWNWEIGHT_WEIGHTS.items():
-        try: bonus += t.count(kw.lower()) * int(w) * BASE_UNIT
+        try: bonus -= t.count(kw.lower()) * int(w) * BASE_UNIT  # 패널티: 점수 차감
         except: pass
     return base + bonus
 
@@ -389,9 +374,9 @@ def core_title_key(title: str) -> str:
     t = re.sub(r"\d[\d,\.]*", " ", t)                           # 숫자 제거
     t = t.lower()
     for w in COMPANY_WORDS:
-        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
+        t = t.replace(w.lower(), " ")   # \b는 한글 경계에 작동 안 함 → 단순 replace
     for w in STOP_TOKENS:
-        t = re.sub(rf"\b{re.escape(w.lower())}\b", " ", t)
+        t = t.replace(w.lower(), " ")
     t = re.sub(r"\s+", " ", t).strip()
     return t if len(t) >= 6 else (title or "").lower()
 

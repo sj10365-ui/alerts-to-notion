@@ -49,6 +49,21 @@ jobs:
           USE_FULLTEXT: ${{ vars.USE_FULLTEXT }}
           FULLTEXT_TIMEOUT: ${{ vars.FULLTEXT_TIMEOUT }}
           SUMMARY_MAX_CHARS: ${{ vars.SUMMARY_MAX_CHARS }}
+
+          # 도메인 필터 (비워두면 기본값 적용)
+          DOMAIN_ALLOW: ${{ vars.DOMAIN_ALLOW }}
+          DOMAIN_BLOCK: ${{ vars.DOMAIN_BLOCK }}
+
+          # 랭킹 가중치 (비워두면 기본값 적용)
+          FAVOR_WEIGHTS: ${{ vars.FAVOR_WEIGHTS }}
+          DOWNWEIGHT_WEIGHTS: ${{ vars.DOWNWEIGHT_WEIGHTS }}
+
+          # 블록 문구 (비워두면 코드 기본값 적용)
+          PHRASE_BLOCK: ${{ vars.PHRASE_BLOCK }}
+
+          # 카테고리/출처 사전 파일
+          KEYWORD_CATEGORY_FILE: "dictionary/keyword_map.json"
+          SOURCE_TYPE_MAP_FILE: "dictionary/source_type_map.json"
         run: python alerts_to_notion.py
 
       # 이번 실행 후 갱신된 .seen_urls.json 저장(다음 실행에서 재사용)
@@ -59,4 +74,4 @@ jobs:
           name: seen-cache
           path: .seen_urls.json
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 60  # SEEN_TTL_DAYS 기본값(60일)과 일치

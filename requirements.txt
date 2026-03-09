@@ -2,4 +2,4 @@ feedparser
 requests
 python-dotenv
 rapidfuzz
-trafilatura==1.6.3
+trafilatura>=1.6.3
