@@ -1,0 +1,22 @@
+name: keep-alive
+
+on:
+  schedule:
+    # 55일마다 실행 (60일 비활성 제한보다 먼저 실행)
+    - cron: "0 0 1 */2 *"   # 짝수달 1일 00:00 UTC (약 60일 간격)
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Keep repository active
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep-alive [skip ci]"
+          git push
