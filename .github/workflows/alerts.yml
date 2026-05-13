@@ -6,6 +6,9 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch: {}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -15,11 +18,11 @@ jobs:
 
       # 지난 실행에서 생산된 .seen_urls.json 복원(중복 방지)
       - name: Restore seen cache
-        uses: actions/download-artifact@v4
+        uses: actions/cache@v4
         with:
-          name: seen-cache
-          path: .
-        continue-on-error: true
+          path: .seen_urls.json
+          key: seen-cache-${{ github.run_id }}
+          restore-keys: seen-cache-
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -65,13 +68,3 @@ jobs:
           KEYWORD_CATEGORY_FILE: "dictionary/keyword_map.json"
           SOURCE_TYPE_MAP_FILE: "dictionary/source_type_map.json"
         run: python alerts_to_notion.py
-
-      # 이번 실행 후 갱신된 .seen_urls.json 저장(다음 실행에서 재사용)
-      - name: Save seen cache
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: seen-cache
-          path: .seen_urls.json
-          if-no-files-found: ignore
-          retention-days: 60  # SEEN_TTL_DAYS 기본값(60일)과 일치
