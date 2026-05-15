@@ -477,10 +477,24 @@ def notion_create_page(it, cat:str, source_type:str):
     if source_type:
         data["properties"]["SourceType"] = {"select": {"name": source_type}}
 
-    r = requests.post(url, headers=headers, json=data, timeout=20)
-    if not r.ok:
-        logging.error(f"Notion error: {r.text}")
-    return r.ok
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            r = requests.post(url, headers=headers, json=data, timeout=60)
+            if r.ok:
+                return True
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                logging.warning(f"Notion {r.status_code} (attempt {attempt}/3): {r.text[:200]}")
+                time.sleep(2 ** attempt)
+                continue
+            logging.error(f"Notion error {r.status_code}: {r.text[:500]}")
+            return False
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            logging.warning(f"Notion request failed (attempt {attempt}/3): {e}")
+            time.sleep(2 ** attempt)
+    logging.error(f"Notion create_page giving up after 3 tries: {last_err}")
+    return False
 
 # =================== MAIN ===================
 def main():
